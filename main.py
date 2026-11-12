@@ -338,6 +338,19 @@ with tab6:
         else:
             slope, intercept = np.polyfit(train[X_COL], train[Y_COL], 1)
 
+            # pages/모델_평가.py 에서 같은 모델을 평가할 수 있도록 저장
+            st.session_state["reg_model"] = {
+                "slope": float(slope),
+                "intercept": float(intercept),
+                "train": train,
+                "test": test,
+                "data": data,
+                "x_col": X_COL,
+                "y_col": Y_COL,
+                "test_ratio": float(test_ratio),
+                "seed": int(seed),
+            }
+
             def predict(v):
                 return slope * np.asarray(v) + intercept
 
