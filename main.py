@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="3D 프린터 데이터 분석", page_icon="🖨️", layout="wide")
@@ -140,8 +141,8 @@ df, log = preprocess(raw, remove_outliers)
 num_cols = df.select_dtypes(include="number").columns.tolist()
 cat_cols = df.select_dtypes(exclude="number").columns.tolist()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📋 개요", "🧹 전처리", "📖 변수 설명", "📊 시각화", "🔍 소재·패턴 비교"]
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["📋 개요", "🧹 전처리", "📖 변수 설명", "📊 시각화", "🔍 소재·패턴 비교", "📈 선형회귀 예측"]
 )
 
 # ---- 개요
@@ -262,3 +263,83 @@ with tab5:
         st.dataframe(df.groupby(g)[result_cols].mean().round(3))
         for t in result_cols:
             st.plotly_chart(px.box(df, x=g, y=t, color=g, title=f"{g}별 {t}"))
+
+# ---- 선형회귀 예측 (layer_height → roughness)
+with tab6:
+    st.subheader("단순 선형회귀: 레이어 높이 → 표면 거칠기")
+    X_COL, Y_COL = "layer_height", "roughness"
+
+    if X_COL not in df.columns or Y_COL not in df.columns:
+        st.warning(f"{X_COL}, {Y_COL} 컬럼이 필요합니다.")
+    else:
+        c1, c2 = st.columns(2)
+        test_ratio = c1.slider("테스트 데이터 비율", 0.1, 0.5, 0.2, 0.05)
+        seed = c2.number_input("랜덤 시드", value=42, step=1)
+
+        data = df[[X_COL, Y_COL]].dropna()
+        order = np.random.default_rng(int(seed)).permutation(len(data))
+        n_test = max(1, int(round(len(data) * test_ratio)))
+        test = data.iloc[order[:n_test]]
+        train = data.iloc[order[n_test:]]
+
+        if len(train) < 2 or train[X_COL].nunique() < 2:
+            st.warning("학습 데이터가 부족합니다. 테스트 비율을 낮춰 보세요.")
+        else:
+            # 최소제곱법으로 직선 적합: y = slope * x + intercept
+            slope, intercept = np.polyfit(train[X_COL], train[Y_COL], 1)
+
+            def predict(x):
+                return slope * np.asarray(x) + intercept
+
+            def evaluate(d):
+                y = d[Y_COL].to_numpy()
+                p = predict(d[X_COL].to_numpy())
+                ss_res = float(((y - p) ** 2).sum())
+                ss_tot = float(((y - y.mean()) ** 2).sum())
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+                rmse = float(np.sqrt(np.mean((y - p) ** 2)))
+                mae = float(np.mean(np.abs(y - p)))
+                return {"R²": round(r2, 4), "RMSE": round(rmse, 3), "MAE": round(mae, 3)}
+
+            st.markdown(f"**회귀식:** `roughness = {slope:.3f} × layer_height + {intercept:.3f}`")
+            st.caption(
+                f"레이어 높이가 0.1mm 늘어날 때 거칠기는 약 {slope * 0.1:.2f}μm 변하는 것으로 추정됩니다. "
+                f"(상관계수 r = {data[X_COL].corr(data[Y_COL]):.3f})"
+            )
+
+            m = pd.DataFrame(
+                {"학습": evaluate(train), "테스트": evaluate(test)}
+            ).T
+            m["데이터 수"] = [len(train), len(test)]
+            st.markdown("**모델 성능**")
+            st.dataframe(m)
+
+            # 산점도 + 회귀선
+            plot_df = pd.concat(
+                [train.assign(구분="학습"), test.assign(구분="테스트")]
+            )
+            fig = px.scatter(plot_df, x=X_COL, y=Y_COL, color="구분", title="실제값과 회귀선")
+            xs = np.linspace(data[X_COL].min(), data[X_COL].max(), 100)
+            fig.add_trace(go.Scatter(x=xs, y=predict(xs), mode="lines", name="회귀선"))
+            st.plotly_chart(fig)
+
+            # 잔차 그림
+            resid = test[Y_COL].to_numpy() - predict(test[X_COL].to_numpy())
+            rfig = px.scatter(
+                x=predict(test[X_COL].to_numpy()), y=resid,
+                labels={"x": "예측값", "y": "잔차(실제−예측)"},
+                title="테스트 데이터 잔차",
+            )
+            rfig.add_hline(y=0, line_dash="dash")
+            st.plotly_chart(rfig)
+
+            # 새 값 예측
+            st.markdown("**거칠기 예측하기**")
+            x_min, x_max = float(data[X_COL].min()), float(data[X_COL].max())
+            new_x = st.number_input(
+                "레이어 높이 (mm)", value=float(round((x_min + x_max) / 2, 3)),
+                step=0.01, format="%.3f",
+            )
+            st.metric("예측 거칠기 (μm)", f"{float(predict(new_x)):.2f}")
+            if new_x < x_min or new_x > x_max:
+                st.warning(f"학습 데이터 범위({x_min}~{x_max}mm) 밖의 값이라 예측 신뢰도가 낮습니다.")
